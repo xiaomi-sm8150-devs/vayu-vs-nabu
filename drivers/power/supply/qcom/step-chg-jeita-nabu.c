@@ -1,4 +1,5 @@
 /* Copyright (c) 2017-2019 The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -142,6 +143,9 @@ static bool is_bq25970_available(struct step_chg_info *chip)
 {
 	if (!chip->bq_psy)
 		chip->bq_psy = power_supply_get_by_name("bq2597x-standalone");
+
+        if (!chip->bq_psy)
+                chip->bq_psy = power_supply_get_by_name("ln8000");
 
 	if (!chip->bq_psy)
 		return false;
@@ -289,7 +293,7 @@ static int get_step_chg_jeita_setting_from_profile(struct step_chg_info *chip)
 		return -EBUSY;
 
 	profile_node = of_batterydata_get_best_profile(batt_node,
-					batt_id_ohms / 1000, NULL);
+					batt_id_ohms / 1000, "K82_sunwoda_8720mah");
 	if (IS_ERR(profile_node))
 		return PTR_ERR(profile_node);
 
@@ -680,7 +684,7 @@ static int handle_step_chg_config(struct step_chg_info *chip)
 		vote(chip->fcc_votable, STEP_CHG_VOTER, true, fcc_ua);
 	}
 
-	pr_info("%s = %d Step-FCC = %duA taper-fcc: %d\n",
+	pr_err("%s = %d Step-FCC = %duA taper-fcc: %d\n",
 		chip->step_chg_config->param.prop_name, pval.intval,
 		get_client_vote(chip->fcc_votable, STEP_CHG_VOTER),
 		chip->taper_fcc);
@@ -932,6 +936,8 @@ static int handle_jeita(struct step_chg_info *chip)
 			pr_err("get hvdcp3_type failed, rc=%d\n", rc);
 
 		if ((pval.intval == HVDCP3_CLASS_B_27W)
+					|| (pval.intval == HVDCP3P5_CLASS_A_18W)
+					|| (pval.intval == HVDCP3P5_CLASS_B_27W)
 					|| (pd_authen_result == 1)) {
 			if ((temp >= BATT_WARM_THRESHOLD || temp <= BATT_COOL_THRESHOLD)
 						&& !fast_mode_dis) {

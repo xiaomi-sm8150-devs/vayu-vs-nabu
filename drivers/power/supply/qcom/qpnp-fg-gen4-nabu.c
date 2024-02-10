@@ -1,4 +1,5 @@
 /* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -293,15 +294,21 @@ struct fg_gen4_chip {
 	struct alarm		esr_fast_cal_timer;
 	struct alarm		soc_scale_alarm_timer;
 	struct delayed_work	pl_enable_work;
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	struct delayed_work	battery_authentic_work;
 	int			battery_authentic_result;
+        int                     battery_authentic_slave_result;
+        int			battery_chip_ok;
+        int			battery_chip_slave_ok;
 	struct delayed_work	ds_romid_work;
 	unsigned char		ds_romid[8];
+        unsigned char           ds_slave_romid[8];
 	struct delayed_work	ds_status_work;
 	unsigned char		ds_status[8];
+        unsigned char           ds_slave_status[8];
 	struct delayed_work	ds_page0_work;
 	unsigned char		ds_page0[16];
+        unsigned char           ds_slave_page0[16];
 #endif
 	struct work_struct	pl_current_en_work;
 	struct completion	mem_attn;
@@ -1765,7 +1772,7 @@ static int fg_gen4_rapid_soc_config(struct fg_gen4_chip *chip, bool en)
 	return 0;
 }
 
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 int retry_batt_profile;
 #define BATT_PROFILE_RETRY_COUNT_MAX 5
 #endif
@@ -1788,14 +1795,14 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 					fg->batt_id_ohms / 1000,
 					chip->batt_age_level, &avail_age_level);
 	else {
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 		profile_node = ERR_PTR(-ENXIO);
 		/* if cmdline battery profile vendor is passed to fg driver, use cmdline result */
 		if (is_batt_vendor_sunwoda && !fg->profile_already_find) {
 			pr_err("is_batt_vendor_sunwoda is %d\n", is_batt_vendor_sunwoda);
 			fg->profile_already_find = true;
 			profile_node = of_batterydata_get_best_profile(batt_node,
-					fg->batt_id_ohms / 1000, "J20S_sunwoda_5160mah");
+					fg->batt_id_ohms / 1000, "K82_sunwoda_8720mah");
 		} else if (is_batt_vendor_nvt && !fg->profile_already_find) {
 			pr_err("is_batt_vendor_nvt is %d\n", is_batt_vendor_nvt);
 			fg->profile_already_find = true;
@@ -1809,7 +1816,7 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 				&& (chip->ds_romid[6] == 04) && !fg->profile_already_find) {
 			if ((chip->ds_page0[0] == 'S') || (chip->ds_page0[0] == 'X')) {
 				profile_node = of_batterydata_get_best_profile(batt_node,
-					fg->batt_id_ohms / 1000, "J20S_sunwoda_5160mah");
+					fg->batt_id_ohms / 1000, "K82_sunwoda_8720mah");
 			} else if ((chip->ds_page0[0] == 'N') || (chip->ds_page0[0] == 'A')) {
 				profile_node = of_batterydata_get_best_profile(batt_node,
 					fg->batt_id_ohms / 1000, "J20S_nvt_5160mah");
@@ -1828,9 +1835,9 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 				schedule_delayed_work(&fg->profile_load_work, 500);
 			}
 		} else if (!fg->profile_already_find) {
-				pr_warn("verifty battery fail. use default profile J20S_nvt_5160mah\n");
+				pr_warn("verifty battery fail. use default profile K82_sunwoda_8720mah\n");
 				profile_node = of_batterydata_get_best_profile(batt_node,
-						fg->batt_id_ohms / 1000, "J20S_nvt_5160mah");
+						fg->batt_id_ohms / 1000, "K82_sunwoda_8720mah");
 		}
 #else
 		profile_node = of_batterydata_get_best_profile(batt_node,
@@ -4266,7 +4273,7 @@ static void vbat_sync_work(struct work_struct *work)
 	sys_sync();
 }
 
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 
 static int battery_authentic_period_ms = 1000;
 #define BATTERY_AUTHENTIC_COUNT_MAX 5
@@ -4880,7 +4887,14 @@ static int fg_get_ffc_iterm_for_chg(struct fg_dev *fg)
 	else
 		ffc_chg_iterm = fg->bp.ffc_high_temp_term_curr_ma;
 
-       return ffc_chg_iterm;
+	if (ffc_chg_iterm == 0) {
+		if (batt_temp < 350)
+			ffc_chg_iterm = -1278;
+		else
+			ffc_chg_iterm = -1363;
+	}
+
+	return ffc_chg_iterm;
 }
 
 /* All power supply functions here */
@@ -4897,7 +4911,7 @@ static int fg_psy_get_property(struct power_supply *psy,
 	static bool shutdown_delay_cancel;
 	static bool last_shutdown_delay;
 
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	union power_supply_propval b_val = {0,};
 
 	if (fg->max_verify_psy == NULL) {
@@ -4906,10 +4920,17 @@ static int fg_psy_get_property(struct power_supply *psy,
 			pr_err("max_verify_psy is NULL\n");
 		}
 	}
+
+        if (fg->max_verify_slave_psy == NULL) {
+                fg->max_verify_slave_psy = power_supply_get_by_name("batt_verify_slave");
+                if (fg->max_verify_slave_psy == NULL) {
+                        pr_err("max_verify_slave_psy is NULL\n");
+                }
+        }
 #endif
 
 	switch (psp) {
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	case POWER_SUPPLY_PROP_AUTHENTIC:
 		if (fg->fake_authentic != -EINVAL) {
 			pval->intval = fg->fake_authentic;
@@ -4918,19 +4939,33 @@ static int fg_psy_get_property(struct power_supply *psy,
 
 		if (fg->max_verify_psy == NULL)
 			return -ENODATA;
+                if (fg->max_verify_slave_psy == NULL)
+                        return -ENODATA;
 		rc = power_supply_get_property(fg->max_verify_psy,
 					POWER_SUPPLY_PROP_AUTHEN_RESULT, &b_val);
-		pval->intval = b_val.intval;
-		chip->battery_authentic_result = pval->intval;
+                chip->battery_authentic_result = b_val.intval;
+                rc = power_supply_get_property(fg->max_verify_slave_psy,
+                                        POWER_SUPPLY_PROP_AUTHEN_RESULT, &b_val);
+                chip->battery_authentic_slave_result = b_val.intval;
+                if (chip->battery_authentic_result == 1 && chip->battery_authentic_slave_result == 1) {
+			pval->intval = 1;
+                } else {
+			pval->intval = 0;
+                }
 		break;
 	case POWER_SUPPLY_PROP_ROMID:
 		if (fg->max_verify_psy == NULL)
 			return -ENODATA;
+		if (fg->max_verify_slave_psy == NULL)
+                        return -ENODATA;
 
-		rc = power_supply_get_property(fg->max_verify_psy,
-					POWER_SUPPLY_PROP_ROMID, &b_val);
+                rc = power_supply_get_property(fg->max_verify_psy,
+                                        POWER_SUPPLY_PROP_ROMID, &b_val);
 		memcpy(pval->arrayval, b_val.arrayval, 8);
 		memcpy(chip->ds_romid, b_val.arrayval, 8);
+		rc = power_supply_get_property(fg->max_verify_slave_psy,
+					POWER_SUPPLY_PROP_ROMID, &b_val);
+		memcpy(chip->ds_slave_romid, b_val.arrayval, 8);
 		break;
 	case POWER_SUPPLY_PROP_CHIP_OK:
 		if (fg->fake_chip_ok != -EINVAL) {
@@ -4939,28 +4974,49 @@ static int fg_psy_get_property(struct power_supply *psy,
 		}
 		if (fg->max_verify_psy == NULL)
 			return -ENODATA;
+		if (fg->max_verify_slave_psy == NULL)
+                        return -ENODATA;
 
 		rc = power_supply_get_property(fg->max_verify_psy,
 					POWER_SUPPLY_PROP_CHIP_OK, &b_val);
+		chip->battery_chip_ok = b_val.intval;
 		pval->intval = b_val.intval;
+                rc = power_supply_get_property(fg->max_verify_slave_psy,
+                                        POWER_SUPPLY_PROP_CHIP_OK, &b_val);
+                chip->battery_chip_slave_ok = b_val.intval;
+                if (chip->battery_chip_ok == 1 && chip->battery_chip_slave_ok == 1) {
+			pval->intval = 1;
+                } else {
+			pval->intval = 0;
+		}
 		break;
 	case POWER_SUPPLY_PROP_DS_STATUS:
 		if (fg->max_verify_psy == NULL)
 			return -ENODATA;
+		if (fg->max_verify_slave_psy == NULL)
+                        return -ENODATA;
 
 		rc = power_supply_get_property(fg->max_verify_psy,
 					POWER_SUPPLY_PROP_DS_STATUS, &b_val);
 		memcpy(pval->arrayval, b_val.arrayval, 8);
 		memcpy(chip->ds_status, b_val.arrayval, 8);
+		rc = power_supply_get_property(fg->max_verify_slave_psy,
+                                        POWER_SUPPLY_PROP_DS_STATUS, &b_val);
+		memcpy(chip->ds_slave_status, b_val.arrayval, 8);
 		break;
 	case POWER_SUPPLY_PROP_PAGE0_DATA:
 		if (fg->max_verify_psy == NULL)
 			return -ENODATA;
+		if (fg->max_verify_slave_psy == NULL)
+                        return -ENODATA;
 
 		rc = power_supply_get_property(fg->max_verify_psy,
 					POWER_SUPPLY_PROP_PAGE0_DATA, &b_val);
 		memcpy(pval->arrayval, b_val.arrayval, 16);
 		memcpy(chip->ds_page0, b_val.arrayval, 16);
+		rc = power_supply_get_property(fg->max_verify_slave_psy,
+                                        POWER_SUPPLY_PROP_PAGE0_DATA, &b_val);
+		memcpy(chip->ds_slave_page0, b_val.arrayval, 16);
 		break;
 #endif
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -5303,7 +5359,7 @@ static int fg_psy_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_SHUTDOWN_DELAY_ENABLE:
 		chip->dt.shutdown_delay_enable = pval->intval;
 		break;
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	case POWER_SUPPLY_PROP_AUTHENTIC:
 		fg->fake_authentic = !!pval->intval;
 		break;
@@ -5341,7 +5397,7 @@ static int fg_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_SYS_TERMINATION_CURRENT:
 	case POWER_SUPPLY_PROP_VBATT_FULL_VOL:
 	case POWER_SUPPLY_PROP_KI_COEFF_CURRENT:
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	case POWER_SUPPLY_PROP_AUTHENTIC:
 	case POWER_SUPPLY_PROP_CHIP_OK:
 #endif
@@ -5355,7 +5411,7 @@ static int fg_property_is_writeable(struct power_supply *psy,
 }
 
 static enum power_supply_property fg_psy_props[] = {
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	POWER_SUPPLY_PROP_AUTHENTIC,
 	POWER_SUPPLY_PROP_ROMID,
 	POWER_SUPPLY_PROP_DS_STATUS,
@@ -7011,7 +7067,8 @@ static void fg_battery_soc_smooth_tracking(struct fg_gen4_chip *chip)
 			last_batt_soc = fg->param.update_now ?
 				fg->param.batt_raw_soc : last_batt_soc + soc_changed;
 		else if (last_batt_soc > fg->param.batt_raw_soc
-					&& fg->param.batt_ma > 0)
+					&& fg->param.batt_ma > 0
+					&& fg->charge_status != POWER_SUPPLY_STATUS_FULL)
 			/* Battery in discharging status
 			* update the soc when resuming device
 			*/
@@ -7228,11 +7285,17 @@ static int fg_gen4_probe(struct platform_device *pdev)
 	fg->fake_authentic = -EINVAL;
 	fg->fake_chip_ok = -EINVAL;
 	fg->batt_fake_temp = -EINVAL;
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	chip->battery_authentic_result = -EINVAL;
+        chip->battery_authentic_slave_result = -EINVAL;
+	chip->battery_chip_ok = -EINVAL;
+	chip->battery_chip_slave_ok = -EINVAL;
 	memset(chip->ds_romid, 0, 8);
-	memset(chip->ds_status, 0, 8);
-	memset(chip->ds_page0, 0, 16);
+        memset(chip->ds_slave_romid, 0, 8);
+        memset(chip->ds_status, 0, 8);
+	memset(chip->ds_slave_status, 0, 8);
+        memset(chip->ds_page0, 0, 16);
+	memset(chip->ds_slave_page0, 0, 16);
 	retry_batt_profile = 0;
 	retry_battery_authentic_result = 0;
 	retry_ds_romid = 0;
@@ -7264,7 +7327,7 @@ static int fg_gen4_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&chip->pl_enable_work, pl_enable_work);
 	INIT_WORK(&chip->pl_current_en_work, pl_current_en_work);
 	INIT_DELAYED_WORK(&fg->soc_monitor_work, soc_monitor_work);
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	INIT_DELAYED_WORK(&chip->battery_authentic_work, battery_authentic_work);
 	INIT_DELAYED_WORK(&chip->ds_romid_work, ds_romid_work);
 	INIT_DELAYED_WORK(&chip->ds_status_work, ds_status_work);
@@ -7367,8 +7430,9 @@ static int fg_gen4_probe(struct platform_device *pdev)
 		goto exit;
 	}
 
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
 	fg->max_verify_psy = power_supply_get_by_name("batt_verify");
+        fg->max_verify_slave_psy = power_supply_get_by_name("batt_verify_slave");
 #endif
 	/* Register the power supply */
 	fg_psy_cfg.drv_data = fg;
@@ -7382,8 +7446,8 @@ static int fg_gen4_probe(struct platform_device *pdev)
 				PTR_ERR(fg->fg_psy));
 		goto exit;
 	}
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
-	if (chip->battery_authentic_result != true) {
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_NABU
+	if (chip->battery_authentic_result != true || chip->battery_authentic_slave_result != true) {
 		schedule_delayed_work(&chip->battery_authentic_work,
 				msecs_to_jiffies(0));
 	}
